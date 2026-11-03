@@ -7,7 +7,7 @@
 В Терминале:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ZhdanDesign/jobshturman/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/OpenWiseAI/jobshturman/main/install.sh | sh
 ```
 
 В конце установщик печатает отчёт: у `claude` и `codex` должно быть `added` или `already`. Потом полностью закройте и откройте Claude Code или Codex.

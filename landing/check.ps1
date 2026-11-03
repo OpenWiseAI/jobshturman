@@ -78,9 +78,9 @@ function Probe($name, $url, $todo) {
     }
 }
 $vpn = 'Попробуйте другую сеть (например, раздачу с телефона) или VPN и запустите проверку ещё раз.'
-Probe 'GitHub, выпуск JobShturman' 'https://github.com/ZhdanDesign/jobshturman/releases/latest/download/jobshturman-wheels.zip' "Не скачивается выпуск JobShturman с GitHub. $vpn"
-Probe 'GitHub, установщик' 'https://raw.githubusercontent.com/ZhdanDesign/jobshturman/main/install.ps1' "Не открывается raw.githubusercontent.com, откуда берётся команда установки. $vpn"
-Probe 'GitHub API, проверка обновлений' 'https://api.github.com/repos/ZhdanDesign/jobshturman/releases/latest' "Не отвечает api.github.com: программа поставится, но не будет сама обновляться. $vpn"
+Probe 'GitHub, выпуск JobShturman' 'https://github.com/OpenWiseAI/jobshturman/releases/latest/download/jobshturman-wheels.zip' "Не скачивается выпуск JobShturman с GitHub. $vpn"
+Probe 'GitHub, установщик' 'https://raw.githubusercontent.com/OpenWiseAI/jobshturman/main/install.ps1' "Не открывается raw.githubusercontent.com, откуда берётся команда установки. $vpn"
+Probe 'GitHub API, проверка обновлений' 'https://api.github.com/repos/OpenWiseAI/jobshturman/releases/latest' "Не отвечает api.github.com: программа поставится, но не будет сама обновляться. $vpn"
 Probe 'astral.sh, установщик uv' 'https://astral.sh/uv/install.ps1' "Не открывается astral.sh, откуда ставится uv. $vpn"
 Probe 'GitHub, сам uv' 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip' "Не скачивается uv с GitHub. $vpn"
 Probe 'PyPI, список библиотек' 'https://pypi.org/simple/six/' "Не открывается pypi.org, откуда берутся библиотеки. $vpn"
@@ -111,7 +111,7 @@ Write-Host ''
 if ($problems.Count -eq 0) {
     Write-Host 'Итог: всё в порядке, установка должна пройти.' -ForegroundColor Green
     Write-Host 'Запустите в обычном окне PowerShell:'
-    Write-Host '  irm https://raw.githubusercontent.com/ZhdanDesign/jobshturman/main/install.ps1 | iex' -ForegroundColor White
+    Write-Host '  irm https://raw.githubusercontent.com/OpenWiseAI/jobshturman/main/install.ps1 | iex' -ForegroundColor White
     Write-Host 'В первый раз она скачивает около 120 МБ и идёт несколько минут.'
     $report.Add('Итог: всё в порядке')
 } else {

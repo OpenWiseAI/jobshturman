@@ -179,7 +179,7 @@ def fake_tools(home: Path, installed: str, latest: str) -> tuple[Path, Path]:
 esac""",
         "curl": f"""echo "curl $*" >> "{log}"
 case "$*" in
-  *url_effective*) echo "https://github.com/ZhdanDesign/jobshturman/releases/tag/v{latest}" ;;
+  *url_effective*) echo "https://github.com/OpenWiseAI/jobshturman/releases/tag/v{latest}" ;;
   *) while [ $# -gt 0 ]; do [ "$1" = "-o" ] && touch "$2"; shift; done ;;
 esac""",
         "hrs": f"""[ "$1" = "--version" ] && echo "jbs {installed}" && exit 0

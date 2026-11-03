@@ -122,7 +122,7 @@ function Install-Wheels($dir) {
 
 $Bin = (& uv tool dir --bin).Trim()
 $Hrs = Join-Path $Bin $(if ($IsLinux -or $IsMacOS) { 'hrs' } else { 'hrs.exe' })
-$Latest = 'https://github.com/ZhdanDesign/jobshturman/releases/latest/download/jobshturman-wheels.zip'
+$Latest = 'https://github.com/OpenWiseAI/jobshturman/releases/latest/download/jobshturman-wheels.zip'
 function Version-Of($text) { ([regex]'\d+(\.\d+){2,3}').Match("$text").Value }
 if (-not $Source) {
     if (-not (Test-Path $Hrs)) {
@@ -130,7 +130,7 @@ if (-not $Source) {
     } else {
         $have = ''; $newest = ''
         try { $have = Version-Of (& $Hrs --version 2>$null) } catch {}
-        try { $newest = Version-Of (Invoke-RestMethod -TimeoutSec 30 -Uri 'https://api.github.com/repos/ZhdanDesign/jobshturman/releases/latest').tag_name } catch {}
+        try { $newest = Version-Of (Invoke-RestMethod -TimeoutSec 30 -Uri 'https://api.github.com/repos/OpenWiseAI/jobshturman/releases/latest').tag_name } catch {}
         if (-not $have -or ($newest -and [version]$have -lt [version]$newest)) {
             Say "обновляю программу с версии $have до $newest"
             $Source = $Latest

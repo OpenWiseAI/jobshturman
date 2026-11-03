@@ -16,7 +16,7 @@ set -eu
 
 SKILL_DIR=$(cd "$(dirname "$0")/.." && pwd)
 SOURCE=${1:-${HRS_SOURCE:-}}
-RELEASES="https://github.com/ZhdanDesign/jobshturman/releases"
+RELEASES="https://github.com/OpenWiseAI/jobshturman/releases"
 DEFAULT_SOURCE="$RELEASES/latest/download/jobshturman-wheels.zip"
 FROM_PLUGIN=""
 case "$SKILL_DIR" in */.claude/plugins/*) FROM_PLUGIN="--from-plugin" ;; esac

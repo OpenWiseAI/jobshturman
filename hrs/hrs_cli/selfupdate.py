@@ -30,7 +30,7 @@ from hrshturman_core import DomainError
 
 from . import license, paths, setup, update_runner
 
-REPO = "ZhdanDesign/jobshturman"
+REPO = "OpenWiseAI/jobshturman"
 ASSET = "jobshturman-wheels.zip"
 SIGNATURE = ASSET + ".sig"  # base64 Ed25519 over RELEASE_TAG + the archive, by the methodology signing key
 RELEASE_TAG = b"jobshturman-release\n"  # a signed methodology bundle can never pass as a release, nor the reverse

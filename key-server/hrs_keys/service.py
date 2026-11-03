@@ -29,8 +29,8 @@ CHANNELS = ("stable", "test")
 CONSENT_HRS = "0.4.0"
 NOTE_MAX = 1000
 HRS_UPDATE = ("Вышла новая версия методики, но её читает только новый JobShturman. Обновите программу. "
-              "macOS и Linux: curl -fsSL https://raw.githubusercontent.com/ZhdanDesign/jobshturman/main/install.sh | sh; "
-              "Windows (PowerShell): irm https://raw.githubusercontent.com/ZhdanDesign/jobshturman/main/install.ps1 | iex")
+              "macOS и Linux: curl -fsSL https://raw.githubusercontent.com/OpenWiseAI/jobshturman/main/install.sh | sh; "
+              "Windows (PowerShell): irm https://raw.githubusercontent.com/OpenWiseAI/jobshturman/main/install.ps1 | iex")
 
 
 RELEASE_TAG = b"jobshturman-release\n"  # the same prefix as hrs_cli.selfupdate.RELEASE_TAG
