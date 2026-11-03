@@ -261,8 +261,16 @@ def test_an_old_server_address_moves_to_the_new_one(keys):
     state = json.loads(license.state_file().read_text(encoding="utf-8"))
     license.state_file().write_text(json.dumps(state | {"server": "https://tools.owai.ru/hrshturman/keys"}),
                                     encoding="utf-8")
-    assert license.load()["server"] == license.DEFAULT_SERVER == "https://tools.owai.ru/jobshturman/keys"
+    assert license.load()["server"] == license.DEFAULT_SERVER == "https://jobsh.ru/keys"
     assert json.loads(license.state_file().read_text(encoding="utf-8"))["server"] == license.DEFAULT_SERVER
+
+
+def test_the_tools_owai_address_moves_to_jobsh_ru(keys):
+    license.login(issue(keys)["key"], http=keys)
+    state = json.loads(license.state_file().read_text(encoding="utf-8"))
+    license.state_file().write_text(json.dumps(state | {"server": "https://tools.owai.ru/jobshturman/keys"}),
+                                    encoding="utf-8")
+    assert license.load()["server"] == "https://jobsh.ru/keys"
 
 
 def publish_next(keys, tmp_path, version, note, important=False):

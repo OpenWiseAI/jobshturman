@@ -1,6 +1,6 @@
 # JobShturman: проверка, можно ли установить программу на этот компьютер с Windows.
 #
-#   $w=New-Object Net.WebClient;$w.Encoding=[Text.Encoding]::UTF8;iex $w.DownloadString('https://tools.owai.ru/jobshturman/check.ps1')
+#   $w=New-Object Net.WebClient;$w.Encoding=[Text.Encoding]::UTF8;iex $w.DownloadString('https://jobsh.ru/check.ps1')
 #
 # Only reads and downloads into memory: nothing is installed, nothing on the disk is changed. At the
 # end the report goes to the clipboard so the person can paste it to support. The whole script is one
@@ -85,7 +85,7 @@ Probe 'astral.sh, установщик uv' 'https://astral.sh/uv/install.ps1' "�
 Probe 'GitHub, сам uv' 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip' "Не скачивается uv с GitHub. $vpn"
 Probe 'PyPI, список библиотек' 'https://pypi.org/simple/six/' "Не открывается pypi.org, откуда берутся библиотеки. $vpn"
 Probe 'PyPI, файлы библиотек' 'https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl' "Не скачиваются файлы с files.pythonhosted.org. $vpn"
-Probe 'сервер ключей JobShturman' 'https://tools.owai.ru/jobshturman/keys/v1/tariffs' 'Не отвечает наш сервер ключей tools.owai.ru: без него ключ не проверится. Напишите нам в поддержку.'
+Probe 'сервер ключей JobShturman' 'https://jobsh.ru/keys/v1/tariffs' 'Не отвечает наш сервер ключей jobsh.ru: без него ключ не проверится. Напишите нам в поддержку.'
 
 Head 'Что уже стоит'
 $uv = Get-Command uv -ErrorAction SilentlyContinue

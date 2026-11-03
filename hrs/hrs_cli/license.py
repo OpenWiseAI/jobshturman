@@ -33,9 +33,9 @@ from hrshturman_core.brand import PRODUCT_NAME
 
 from . import keystore, paths, watermark
 
-DEFAULT_SERVER = "https://tools.owai.ru/jobshturman/keys"
+DEFAULT_SERVER = "https://jobsh.ru/keys"
 # Addresses older hrs wrote into license.json; read them as the current one.
-OLD_SERVERS = ("https://tools.owai.ru/hrshturman/keys",)
+OLD_SERVERS = ("https://tools.owai.ru/hrshturman/keys", "https://tools.owai.ru/jobshturman/keys")
 # Public key of the production bundle signing key (hrs-keys signing-key on the server).
 PUBLIC_KEYS: tuple[str, ...] = ("g0+l6EZh3voBDLJApGDmDOIPlaE7gXG0leEo/HzJsZ4=",)
 CHECK_EVERY = timedelta(hours=3)  # a release or an important methodology reaches the agent the same day
@@ -49,7 +49,7 @@ TIMEOUT = 15.0
 GATED = True
 OPEN_TEXTS = ("agent/genesis.md", "references/runtime_constraints.md")
 # The licence agreement (the offer on the site); the key server may name another address in its status.
-LICENSE_URL = "https://tools.owai.ru/jobshturman/oferta/"
+LICENSE_URL = "https://jobsh.ru/oferta/"
 
 
 def now() -> datetime:

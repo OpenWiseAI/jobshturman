@@ -68,7 +68,7 @@ class Settings:
     signing_key: Path
     renew_url: str
     methodologist_token: str | None = None  # comma separated; edits and publishes the methodology only
-    license_url: str = "https://tools.owai.ru/jobshturman/oferta/"
+    license_url: str = "https://jobsh.ru/oferta/"
 
     @classmethod
     def from_env(cls):
@@ -78,9 +78,9 @@ class Settings:
             raise SystemExit("HRS_KEYS_SECRET: нужна случайная строка от 32 символов")
         return cls(data=data, secret=secret.encode(), admin_token=os.environ.get("HRS_KEYS_ADMIN_TOKEN") or None,
                    signing_key=Path(os.environ.get("HRS_KEYS_SIGNING_KEY") or data / "signing_key.pem"),
-                   renew_url=os.environ.get("HRS_KEYS_RENEW_URL", "https://tools.owai.ru/jobshturman/"),
+                   renew_url=os.environ.get("HRS_KEYS_RENEW_URL", "https://jobsh.ru/"),
                    methodologist_token=os.environ.get("HRS_KEYS_METHODOLOGIST_TOKEN") or None,
-                   license_url=os.environ.get("HRS_KEYS_LICENSE_URL", "https://tools.owai.ru/jobshturman/oferta/"))
+                   license_url=os.environ.get("HRS_KEYS_LICENSE_URL", "https://jobsh.ru/oferta/"))
 
 
 def now() -> datetime:
