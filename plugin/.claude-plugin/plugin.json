@@ -1,0 +1,8 @@
+{
+  "name": "hrshturman",
+  "version": "0.9.4.13",
+  "description": "JobShturman (Job Штурман, Джоб Штурман, бывший HR Штурман): установочный навык и локальный MCP-сервер hrs — анкета, резюме, сбор вакансий с HH, Telegram и LinkedIn",
+  "author": {
+    "name": "JobShturman"
+  }
+}
