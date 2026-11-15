@@ -4,7 +4,7 @@
   hrs-keys signing-key                      create the bundle signing key, print the public key for hrs
   hrs-keys sign-release FILE                sign a release archive (jobshturman-wheels.zip): writes FILE.sig
   hrs-keys tariffs
-  hrs-keys issue <tariff> [--months N | --until DATE] [--order REF] [--devices N]
+  hrs-keys issue [--months N | --until DATE] [--order REF] [--devices N]
   hrs-keys list [--state active|expiring|expired|revoked]
   hrs-keys extend <key_id> (--months N | --until DATE)
   hrs-keys revoke <key_id> --reason refund|violation|reissue|other
@@ -40,7 +40,7 @@ def main(argv=None) -> int:
     sub.add_parser("sign-release").add_argument("file")
     sub.add_parser("tariffs")
     p = sub.add_parser("issue")
-    p.add_argument("tariff")
+    p.add_argument("tariff", nargs="?", help="не нужен: тариф один")
     p.add_argument("--months", type=int)
     p.add_argument("--until")
     p.add_argument("--order")

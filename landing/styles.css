@@ -569,6 +569,8 @@ main:focus { outline: none; }
 .price { font-size: 2.5rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .plan ul { padding-inline-start: 1.1em; display: grid; gap: 8px; flex: 1; }
 .plan .button { margin-block-start: 6px; }
+.plans-single { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); align-items: start; }
+.plans-single .choose { margin-block-start: 0; }
 .plan.featured { border: 2px solid var(--agent-solid); box-shadow: 0 24px 50px -30px rgb(10 125 73 / 55%); }
 .badge { position: absolute; inset-block-start: -13px; inset-inline-start: 26px; font: 700 .75rem/1 var(--mono); text-transform: uppercase; letter-spacing: .06em; color: #fff; background: var(--agent-solid); padding: .55em .8em; border-radius: 999px; }
 .offer-note { font-size: .8125rem; color: var(--muted); }

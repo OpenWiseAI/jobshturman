@@ -6,12 +6,13 @@ import hmac
 import io
 import json
 import os
+import re
 import secrets
 import time
 import uuid
 import zipfile
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -20,12 +21,20 @@ from hrshturman_core import DomainError, methodology
 
 from . import bundle as bundles_mod
 from . import library, watermark
-from .db import DB
+from .db import DB, TARIFF_ID
 
 TOKEN_TTL = timedelta(hours=24)
 WARN_BEFORE = timedelta(days=1)
 KEY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I
 CHANNELS = ("stable", "test")
+SEGMENTS = ("private", "tester", "agency")
+BATCH_MAX = 200
+BULK_MAX = 500
+ARCHIVE_REASONS = ("expired", "revoked", "unneeded", "other")
+MSK = timezone(timedelta(hours=3))  # dates in files for agencies; Moscow has no daylight saving
+AGENCY_FIELDS = ("name", "contact_name", "phone", "email", "note")
+FIELD_MAX = {"name": 80, "contact_name": 120, "phone": 40, "email": 120, "note": 500}
+INSTALL_URL = "https://jobsh.ru/#how"
 CONSENT_HRS = "0.4.0"
 NOTE_MAX = 1000
 HRS_UPDATE = ("Вышла новая версия методики, но её читает только новый JobShturman. Обновите программу. "
@@ -142,6 +151,83 @@ def public_key_b64(key: Ed25519PrivateKey) -> str:
     return base64.b64encode(raw).decode()
 
 
+def _clean(value, limit: int) -> str | None:
+    """One line of plain text: no control characters, trimmed to the limit."""
+    if value is None:
+        return None
+    text = " ".join("".join(ch if ch.isprintable() else " " for ch in str(value)).split())
+    return text[:limit] or None
+
+
+TRANSLIT = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+                    ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r", "s",
+                     "t", "u", "f", "h", "ts", "ch", "sh", "sch", "", "y", "", "e", "yu", "ya"]))
+
+
+def _slug(name: str) -> str:
+    """A file name part in Latin letters: HTTP headers carry only them."""
+    low = "".join(TRANSLIT.get(ch, ch) for ch in name.lower())
+    out = "".join(ch if ch.isascii() and ch.isalnum() else "-" for ch in low)
+    return "-".join(part for part in out.split("-") if part)[:40] or "agency"
+
+
+def _msk(ts: str | None, fmt: str = "%d.%m.%Y") -> str:
+    return parse(ts).astimezone(MSK).strftime(fmt) if ts else "—"
+
+
+_SHORT = re.compile(r"(?<![\w-])(в|во|с|со|и|к|ко|о|об|у|а|на|до|по|из|за|не|ни|для|при|без|что|или|от|под|над|про|лишь)[ ](?=\S)", re.IGNORECASE)
+
+
+def _nb(text: str) -> str:
+    """Short words and numbers stick to the next word with a no-break space: the file goes to people as is."""
+    text = _SHORT.sub(lambda m: m.group(1) + "\u00a0", text)
+    return re.sub(r"(\d)[ ](?=[^\s|])", "\\1\u00a0", text).replace(" —", "\u00a0—")
+
+
+def _md(text) -> str:
+    """A table cell: no pipes or line breaks."""
+    return str(text or "—").replace("|", "/").replace("\n", " ")
+
+
+STATE_RU = {"active": "действует", "expiring": "истекает", "expired": "истёк", "revoked": "заблокирован", "archived": "в архиве"}
+
+
+def batch_markdown(agency: str, batch: dict, rows: list[tuple]) -> str:
+    lines = [f"# Ключи JobShturman — {_md(agency)}", "",
+             (f"Выдано: {_msk(batch['issued_at'])} · ключей: {batch['count']} · действуют до: {_msk(batch['expires_at'])}"
+              f" включительно · на каждый ключ до {batch['device_limit']} устройств"), ""]
+    if batch.get("recipient"):
+        lines += [f"Получатель: {_md(batch['recipient'])}", ""]
+    lines += ["| № | Ключ | Выдан | Действует до | Получатель |", "|---|---|---|---|---|"]
+    lines += [f"| {n} | `{key}` | {_msk(issued)} | {_msk(expires)} | {_md(who)} |"
+              for n, (key, issued, expires, who) in enumerate(rows, 1)]
+    lines += ["", "## Как начать", "",
+              f"1. Установите JobShturman по инструкции: {INSTALL_URL}",
+              "2. Когда агент попросит ключ, вставьте один ключ из таблицы.",
+              "3. Один ключ — для одного человека. Его можно активировать на указанном числе устройств.",
+              "4. Ключ работает до даты в таблице. Для продления напишите тому, кто выдал ключ.", "",
+              ("Сохраните этот файл: ключи хранятся только в нём, сервер знает лишь их проверочные отпечатки. "
+               "Потерянный ключ можно перевыпустить."), ""]
+    return "\n".join(_nb(line) if not line.startswith("|") else line for line in lines)
+
+
+def agency_markdown(agency: dict, keys: list[dict]) -> str:
+    st = agency["stats"]
+    lines = [f"# Ключи JobShturman — {_md(agency['name'])}", "",
+             (f"Сводка на {_msk(iso(now()))}: всего {st['keys']}, действуют {st['active']}, "
+              f"активированы {st['activated']}, устройств {st['devices']}."), ""]
+    contacts = [v for v in (agency.get("contact_name"), agency.get("phone"), agency.get("email")) if v]
+    if contacts:
+        lines += ["Контакт: " + " · ".join(_md(v) for v in contacts), ""]
+    lines += ["Полные ключи есть только в файлах, выданных вместе с пакетами; здесь — начало ключа.", "",
+              "| № | Ключ | Выдан | Действует до | Получатель | Статус | Устройств | Последний вход |",
+              "|---|---|---|---|---|---|---|---|"]
+    lines += [f"| {n} | `JBS-{k['key_hint']}…` | {_msk(k['issued_at'])} | {_msk(k['expires_at'])} | {_md(k.get('note'))} |"
+              f" {STATE_RU.get(k['state'], k['state'])} | {len(k['devices']) if isinstance(k['devices'], list) else k['devices']}"
+              f" из {k['device_limit']} | {_msk(k['last_seen'])} |" for n, k in enumerate(keys, 1)]
+    return "\n".join(_nb(line) if not line.startswith("|") else line for line in lines) + "\n"
+
+
 class KeyServer:
     def __init__(self, settings: Settings):
         self.s = settings
@@ -188,6 +274,9 @@ class KeyServer:
     # --- key state ---
 
     def _check_usable(self, c, row):
+        if row["archived_at"]:
+            self._log(c, row["id"], "denied", "archived")
+            raise KeyServerError("key_revoked", "Ключ отключён. Напишите в поддержку.", 403)
         if row["revoked_at"]:
             self._log(c, row["id"], "denied", "revoked")
             raise KeyServerError("key_revoked", "Ключ заблокирован. Напишите в поддержку.", 403)
@@ -363,35 +452,51 @@ class KeyServer:
         with self._tx() as c:
             return [dict(r) for r in c.execute("SELECT * FROM tariffs ORDER BY price_rub_from")]
 
-    def update_tariff(self, tariff_id: str, **fields) -> dict:
-        allowed = {"title", "price_rub_from", "price_rub_to", "months", "device_limit", "active"}
-        fields = {k: v for k, v in fields.items() if v is not None}
-        if set(fields) - allowed:
-            raise KeyServerError("invalid_request", f"можно менять только {sorted(allowed)}")
+    def tariff(self) -> dict:
+        """The only tariff that is sold."""
         with self._tx() as c:
-            if not c.execute("SELECT 1 FROM tariffs WHERE id = ?", (tariff_id,)).fetchone():
-                raise KeyServerError("not_found", "Нет такого тарифа", 404)
-            for k, v in fields.items():
-                c.execute(f"UPDATE tariffs SET {k} = ? WHERE id = ?", (v, tariff_id))
-            self._log(c, None, "admin", f"tariff {tariff_id} {sorted(fields)}")
-            return dict(c.execute("SELECT * FROM tariffs WHERE id = ?", (tariff_id,)).fetchone())
+            return dict(c.execute("SELECT * FROM tariffs WHERE id = ?", (TARIFF_ID,)).fetchone())
 
-    def issue(self, tariff_id: str, months: int | None = None, expires_at: str | None = None,
-              order_ref: str | None = None, device_limit: int | None = None) -> dict:
-        """New key. The plain key is returned only here; the server keeps its hash."""
+    def set_price(self, price_rub: int) -> dict:
+        """The admin changes only the price of the tariff."""
+        if not isinstance(price_rub, int) or isinstance(price_rub, bool) or not 1 <= price_rub <= 10_000_000:
+            raise KeyServerError("invalid_request", "Цена — целое число рублей от 1 до 10 000 000")
+        with self._tx() as c:
+            c.execute("UPDATE tariffs SET price_rub_from = ?, price_rub_to = ? WHERE id = ?",
+                      (price_rub, price_rub, TARIFF_ID))
+            self._log(c, None, "admin", f"tariff price {price_rub}")
+            return dict(c.execute("SELECT * FROM tariffs WHERE id = ?", (TARIFF_ID,)).fetchone())
+
+    def _new_key(self, c, tariff, expires: datetime, device_limit: int | None, order_ref: str | None = None,
+                 segment: str = "private", agency_id: str | None = None, batch_id: str | None = None,
+                 note: str | None = None) -> tuple[str, str]:
         raw = "".join(secrets.choice(KEY_ALPHABET) for _ in range(20))
         key = f"{KEY_PREFIX}-" + "-".join(raw[i:i + 4] for i in range(0, 20, 4))
+        key_id = uuid.uuid4().hex[:12]
+        c.execute("INSERT INTO keys (id, key_hash, key_hint, tariff_id, issued_at, expires_at, device_limit, order_ref,"
+                  " segment, agency_id, batch_id, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  (key_id, self._hash("key", normalize_key(key)), raw[:4], tariff["id"], iso(now()), iso(expires),
+                   device_limit or tariff["device_limit"], order_ref, segment, agency_id, batch_id, note))
+        self._log(c, key_id, "admin", "issue")
+        return key, key_id
+
+    def _active_tariff(self, c, tariff_id: str | None = None):
+        tariff = c.execute("SELECT * FROM tariffs WHERE id = ? AND active = 1", (tariff_id or TARIFF_ID,)).fetchone()
+        if tariff is None:
+            raise KeyServerError("not_found", "Нет такого действующего тарифа", 404)
+        return tariff
+
+    def issue(self, tariff_id: str | None = None, months: int | None = None, expires_at: str | None = None,
+              order_ref: str | None = None, device_limit: int | None = None, segment: str = "private",
+              note: str | None = None) -> dict:
+        """New key of a private buyer or a tester. The plain key is returned only here; the server keeps its hash.
+        Agency keys are issued in batches (issue_batch)."""
+        if segment not in ("private", "tester"):
+            raise KeyServerError("invalid_request", "Ключ агентства выдаётся пакетом в карточке агентства")
         with self._tx() as c:
-            tariff = c.execute("SELECT * FROM tariffs WHERE id = ? AND active = 1", (tariff_id,)).fetchone()
-            if tariff is None:
-                raise KeyServerError("not_found", "Нет такого действующего тарифа", 404)
+            tariff = self._active_tariff(c, tariff_id)
             expires = parse(expires_at) if expires_at else add_months(now(), months or tariff["months"])
-            key_id = uuid.uuid4().hex[:12]
-            c.execute("INSERT INTO keys (id, key_hash, key_hint, tariff_id, issued_at, expires_at, device_limit, order_ref)"
-                      " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                      (key_id, self._hash("key", normalize_key(key)), raw[:4], tariff_id, iso(now()), iso(expires),
-                       device_limit or tariff["device_limit"], order_ref))
-            self._log(c, key_id, "admin", "issue")
+            key, key_id = self._new_key(c, tariff, expires, device_limit, order_ref, segment, note=_clean(note, 200))
             return {"key": key, **self._key_view(c, key_id)}
 
     def _key_view(self, c, key_id) -> dict:
@@ -404,7 +509,9 @@ class KeyServer:
                          (key_id,)).fetchone()[0]
         counts = dict(c.execute("SELECT kind, count(*) FROM events WHERE key_id = ? GROUP BY kind", (key_id,)).fetchall())
         view = {k: row[k] for k in row.keys() if k not in ("key_hash", "pin_auto")}  # noqa: SIM118 (sqlite3.Row)
-        if row["revoked_at"]:
+        if row["archived_at"]:
+            state = "archived"
+        elif row["revoked_at"]:
             state = "revoked"
         elif parse(row["expires_at"]) <= now():
             state = "expired"
@@ -416,11 +523,76 @@ class KeyServer:
                                     "last_seen": a["last_seen"]} for a in acts],
                        "last_seen": last, "downloads": counts.get("download", 0), "denied": counts.get("denied", 0)}
 
-    def keys(self, state: str | None = None) -> list[dict]:
+    def keys(self, state: str | None = None, segment: str | None = None, agency_id: str | None = None,
+             archived: bool = False) -> list[dict]:
+        """Keys outside the archive; archived=True — only the archive."""
+        where, args = ["archived_at IS NOT NULL" if archived else "archived_at IS NULL"], []
+        if segment:
+            where.append("segment = ?"); args.append(segment)
+        if agency_id:
+            where.append("agency_id = ?"); args.append(agency_id)
+        sql = "SELECT id FROM keys WHERE " + " AND ".join(where) + " ORDER BY issued_at DESC, rowid DESC"
         with self._tx() as c:
-            ids = [r[0] for r in c.execute("SELECT id FROM keys ORDER BY issued_at DESC")]
-            views = [self._key_view(c, i) for i in ids]
+            views = [self._key_view(c, r[0]) for r in c.execute(sql, args).fetchall()]
         return [v for v in views if state is None or v["state"] == state]
+
+    def _move(self, c, key_id: str, segment: str, agency_id: str | None):
+        if segment not in SEGMENTS:
+            raise KeyServerError("invalid_request", "segment: private, tester или agency")
+        if segment == "agency":
+            self._agency_row(c, agency_id)
+        elif agency_id:
+            raise KeyServerError("invalid_request", "Агентство указывается только для segment=agency")
+        c.execute("UPDATE keys SET segment = ?, agency_id = ?, batch_id = CASE WHEN ? = agency_id THEN batch_id END"
+                  " WHERE id = ?", (segment, agency_id if segment == "agency" else None, agency_id, key_id))
+        self._log(c, key_id, "admin", f"segment {segment}" + (f" {agency_id}" if segment == "agency" else ""))
+
+    def set_segment(self, key_id: str, segment: str | None = None, agency_id: str | None = None,
+                    note: str | None = None) -> dict:
+        """Move a key: to an agency, to private buyers or to testers; or change for whom it was issued."""
+        with self._tx() as c:
+            self._key_view(c, key_id)
+            if segment is not None:
+                self._move(c, key_id, segment, agency_id)
+            if note is not None:
+                c.execute("UPDATE keys SET note = ? WHERE id = ?", (_clean(note, 200), key_id))
+            return self._key_view(c, key_id)
+
+    def bulk(self, ids: list[str], action: str, segment: str | None = None, agency_id: str | None = None,
+             confirm: bool = False, reason: str | None = None, note: str | None = None) -> dict:
+        """Several keys at once, all or nothing: move to a section or an agency, to the archive or back."""
+        ids = list(dict.fromkeys(ids))
+        if not 1 <= len(ids) <= BULK_MAX:
+            raise KeyServerError("invalid_request", f"Выберите от 1 до {BULK_MAX} ключей")
+        if action not in ("move", "archive", "unarchive"):
+            raise KeyServerError("invalid_request", "action: move, archive или unarchive")
+        note = _clean(note, 200)
+        if action == "archive":
+            if confirm is not True:
+                raise KeyServerError("invalid_request", "Перенос в архив нужно подтвердить: confirm=true")
+            if reason not in ARCHIVE_REASONS:
+                raise KeyServerError("invalid_request", "Укажите причину: expired, revoked, unneeded или other")
+            if reason == "other" and not note:
+                raise KeyServerError("invalid_request", "Для «другой причины» нужен комментарий")
+        with self._tx() as c:
+            missing = [i for i in ids if not c.execute("SELECT 1 FROM keys WHERE id = ?", (i,)).fetchone()]
+            if missing:
+                raise KeyServerError("not_found", f"Нет таких ключей: {', '.join(missing[:5])}", 404)
+            for key_id in ids:
+                if action == "move":
+                    self._move(c, key_id, segment or "", agency_id)
+                elif action == "archive":
+                    view = self._key_view(c, key_id)
+                    if view["state"] == "archived":
+                        continue  # already there: keep the reason it went with
+                    c.execute("UPDATE keys SET archived_at = ?, archive_reason = ?, archive_note = ?, archived_state = ?"
+                              " WHERE id = ?", (iso(now()), reason, note, view["state"], key_id))
+                    self._log(c, key_id, "admin", f"archive {reason}")
+                else:
+                    c.execute("UPDATE keys SET archived_at = NULL, archive_reason = NULL, archive_note = NULL,"
+                              " archived_state = NULL WHERE id = ?", (key_id,))
+                    self._log(c, key_id, "admin", "unarchive")
+        return {"action": action, "count": len(ids)}
 
     def key(self, key_id: str) -> dict:
         with self._tx() as c:
@@ -784,5 +956,174 @@ class KeyServer:
         with self._tx() as c:
             current = {r["channel"]: r["version"] for r in c.execute("SELECT * FROM current_bundle")}
         latest = current.get("stable") or next(iter(b["version"] for b in self.bundle_list()), None)
-        return {"keys": len(keys), "by_state": by_state, "devices": sum(len(k["devices"]) for k in keys),
+        segments = {}
+        for k in keys:
+            seg = segments.setdefault(k["segment"], {"keys": 0, "active": 0, "activated": 0})
+            seg["keys"] += 1
+            seg["active"] += k["state"] in ("active", "expiring")
+            seg["activated"] += bool(k["devices"])
+        with self._tx() as c:
+            archived = c.execute("SELECT count(*) FROM keys WHERE archived_at IS NOT NULL").fetchone()[0]
+        return {"keys": len(keys), "by_state": by_state, "devices": sum(len(k["devices"]) for k in keys), "archived": archived,
+                "activated": sum(bool(k["devices"]) for k in keys), "by_segment": segments,
+                "agencies": [self._agency_summary(a, [k for k in keys if k["agency_id"] == a["id"]])
+                             for a in self._agency_rows()],
                 "latest_bundle": latest, "test_bundle": current.get("test")}
+
+    # --- agencies: keys in batches, a read-only login for the agency ---
+
+    def _agency_rows(self, include_archived: bool = True) -> list[dict]:
+        with self._tx() as c:
+            return [dict(r) for r in c.execute("SELECT * FROM agencies" + ("" if include_archived else
+                                               " WHERE archived_at IS NULL") + " ORDER BY created_at, rowid")]
+
+    def _agency_row(self, c, agency_id: str | None):
+        row = c.execute("SELECT * FROM agencies WHERE id = ?", (agency_id or "",)).fetchone()
+        if row is None:
+            raise KeyServerError("not_found", "Нет такого агентства", 404)
+        return row
+
+    @staticmethod
+    def _agency_summary(agency: dict, keys: list[dict]) -> dict:
+        by_state = {}
+        for k in keys:
+            by_state[k["state"]] = by_state.get(k["state"], 0) + 1
+        seen = [k["last_seen"] for k in keys if k["last_seen"]]
+        return dict(agency) | {"stats": {"keys": len(keys), "by_state": by_state,
+                                         "active": by_state.get("active", 0) + by_state.get("expiring", 0),
+                                         "activated": sum(bool(k["devices"]) for k in keys),
+                                         "devices": sum(len(k["devices"]) for k in keys),
+                                         "last_seen": max(seen) if seen else None}}
+
+    def _agency_fields(self, fields: dict, creating: bool) -> dict:
+        out = {}
+        for name in AGENCY_FIELDS:
+            if name in fields and fields[name] is not None:
+                out[name] = _clean(fields[name], FIELD_MAX[name]) or None
+        if creating or "name" in out:
+            if not out.get("name"):
+                raise KeyServerError("invalid_request", "Укажите название агентства")
+            taken = [r["name"] for r in self._agency_rows() if r["id"] != fields.get("_id")]
+            if out["name"].casefold() in {n.casefold() for n in taken}:
+                raise KeyServerError("conflict", "Агентство с таким названием уже есть", 409)
+        if out.get("email") and ("@" not in out["email"] or " " in out["email"]):
+            raise KeyServerError("invalid_request", "Почта указана неверно")
+        return out
+
+    def agencies(self) -> list[dict]:
+        keys = self.keys(segment="agency")
+        return [self._agency_summary(a, [k for k in keys if k["agency_id"] == a["id"]]) for a in self._agency_rows()]
+
+    def agency(self, agency_id: str, full: bool = True) -> dict:
+        """The agency card. full=False is what the agency itself sees: no logins, no internal note."""
+        with self._tx() as c:
+            row = dict(self._agency_row(c, agency_id))
+            batches = [dict(r) for r in c.execute("SELECT * FROM batches WHERE agency_id = ? ORDER BY issued_at DESC, rowid DESC",
+                                                  (agency_id,))]
+            tokens = [dict(r) for r in c.execute("SELECT id, label, created_at, last_used_at, revoked_at FROM agency_tokens"
+                                                 " WHERE agency_id = ? ORDER BY created_at, rowid", (agency_id,))]
+        view = self._agency_summary(row, self.keys(agency_id=agency_id)) | {"batches": batches}
+        if full:
+            return view | {"tokens": tokens}
+        view.pop("note", None)
+        return view
+
+    def create_agency(self, **fields) -> dict:
+        clean = self._agency_fields(fields, creating=True)
+        agency_id = uuid.uuid4().hex[:10]
+        with self._tx() as c:
+            c.execute("INSERT INTO agencies (id, name, contact_name, phone, email, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                      (agency_id, clean["name"], clean.get("contact_name"), clean.get("phone"), clean.get("email"),
+                       clean.get("note"), iso(now())))
+            self._log(c, None, "admin", f"agency create {agency_id}")
+        return self.agency(agency_id)
+
+    def update_agency(self, agency_id: str, archived: bool | None = None, **fields) -> dict:
+        with self._tx() as c:
+            self._agency_row(c, agency_id)
+        clean = self._agency_fields(fields | {"_id": agency_id}, creating=False)
+        with self._tx() as c:
+            for name, value in clean.items():
+                c.execute(f"UPDATE agencies SET {name} = ? WHERE id = ?", (value, agency_id))
+            if archived is not None:
+                c.execute("UPDATE agencies SET archived_at = ? WHERE id = ?", (iso(now()) if archived else None, agency_id))
+            self._log(c, None, "admin", f"agency update {agency_id}")
+        return self.agency(agency_id)
+
+    def issue_batch(self, agency_id: str, count: int, months: int | None = None, expires_at: str | None = None,
+                    device_limit: int | None = None, recipient: str | None = None) -> dict:
+        """count keys for an agency at once. The plain keys and the file with them are returned only here."""
+        if not isinstance(count, int) or not 1 <= count <= BATCH_MAX:
+            raise KeyServerError("invalid_request", f"Количество ключей — от 1 до {BATCH_MAX}")
+        recipient = _clean(recipient, 200)
+        with self._tx() as c:
+            agency = self._agency_row(c, agency_id)
+            if agency["archived_at"]:
+                raise KeyServerError("invalid_request", "Агентство в архиве: верните его, чтобы выдать ключи")
+            tariff = self._active_tariff(c)
+            expires = parse(expires_at) if expires_at else add_months(now(), months or tariff["months"])
+            if expires <= now():
+                raise KeyServerError("invalid_request", "Срок действия должен быть в будущем")
+            limit = device_limit or tariff["device_limit"]
+            batch_id = uuid.uuid4().hex[:10]
+            c.execute("INSERT INTO batches (id, agency_id, count, issued_at, expires_at, device_limit, recipient)"
+                      " VALUES (?, ?, ?, ?, ?, ?, ?)", (batch_id, agency_id, count, iso(now()), iso(expires), limit, recipient))
+            issued = []
+            for _ in range(count):
+                key, key_id = self._new_key(c, tariff, expires, limit, None, "agency", agency_id, batch_id, recipient)
+                issued.append({"key": key, "id": key_id})
+            self._log(c, None, "admin", f"batch {batch_id} {agency_id} {count}")
+            batch = dict(c.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone())
+        rows = [(i["key"], batch["issued_at"], batch["expires_at"], recipient or agency["name"]) for i in issued]
+        return {"batch": batch, "keys": issued, "agency": {"id": agency_id, "name": agency["name"]},
+                "markdown": batch_markdown(agency["name"], batch, rows),
+                "filename": f"jobshturman-keys-{_slug(agency['name'])}-{_msk(batch['issued_at'], '%Y-%m-%d')}.md"}
+
+    def agency_markdown(self, agency_id: str) -> tuple[str, str]:
+        """The list of the agency's keys without the keys themselves (the server keeps only their hashes)."""
+        view = self.agency(agency_id, full=False)
+        return agency_markdown(view, self.keys(agency_id=agency_id)), \
+            f"jobshturman-{_slug(view['name'])}-{_msk(iso(now()), '%Y-%m-%d')}.md"
+
+    def create_agency_token(self, agency_id: str, label: str | None = None) -> dict:
+        token = "jbsa_" + secrets.token_urlsafe(24)
+        token_id = uuid.uuid4().hex[:10]
+        with self._tx() as c:
+            agency = self._agency_row(c, agency_id)
+            if agency["archived_at"]:
+                raise KeyServerError("invalid_request", "Агентство в архиве")
+            c.execute("INSERT INTO agency_tokens (id, agency_id, token_hash, label, created_at) VALUES (?, ?, ?, ?, ?)",
+                      (token_id, agency_id, self._hash("agency", token), _clean(label, 80), iso(now())))
+            self._log(c, None, "admin", f"agency token {agency_id} {token_id}")
+            row = dict(c.execute("SELECT id, label, created_at, last_used_at, revoked_at FROM agency_tokens WHERE id = ?",
+                                 (token_id,)).fetchone())
+        return row | {"token": token}
+
+    def revoke_agency_token(self, agency_id: str, token_id: str) -> dict:
+        with self._tx() as c:
+            self._agency_row(c, agency_id)
+            row = c.execute("SELECT * FROM agency_tokens WHERE id = ? AND agency_id = ?", (token_id, agency_id)).fetchone()
+            if row is None:
+                raise KeyServerError("not_found", "Нет такого входа", 404)
+            c.execute("UPDATE agency_tokens SET revoked_at = coalesce(revoked_at, ?) WHERE id = ?", (iso(now()), token_id))
+            self._log(c, None, "admin", f"agency token revoke {agency_id} {token_id}")
+        return self.agency(agency_id)
+
+    def agency_for_token(self, token: str) -> dict | None:
+        """The agency a login token belongs to; None for an unknown, revoked or archived one."""
+        if not token.startswith("jbsa_"):
+            return None
+        with self._tx() as c:
+            row = c.execute("SELECT t.id, a.id AS agency_id, a.name FROM agency_tokens t JOIN agencies a ON a.id = t.agency_id"
+                            " WHERE t.token_hash = ? AND t.revoked_at IS NULL AND a.archived_at IS NULL",
+                            (self._hash("agency", token),)).fetchone()
+            if row is None:
+                return None
+            c.execute("UPDATE agency_tokens SET last_used_at = ? WHERE id = ?", (iso(now()), row["id"]))
+            return {"id": row["agency_id"], "name": row["name"]}
+
+    @staticmethod
+    def agency_key_view(key: dict) -> dict:
+        """What an agency sees of its key: no payment reference, watermark or version details."""
+        return {k: key[k] for k in ("id", "key_hint", "issued_at", "expires_at", "device_limit", "state", "last_seen",
+                                    "batch_id", "note", "revoked_at")} | {"devices": len(key["devices"])}

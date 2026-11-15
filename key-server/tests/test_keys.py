@@ -71,7 +71,7 @@ def test_active_key_downloads_a_signed_bundle_without_acceptance_files(server, l
     r = activate(server, key["key"].lower().replace("-", " "))  # typed loosely, still found
     assert r.status_code == 200, r.text
     status = r.json()
-    assert status["tariff"]["title"] == "Самостоятельно" and status["warning"] is None
+    assert status["tariff"]["title"] == "JobShturman" and status["warning"] is None
     assert status["bundle"]["version"] == "0.4.0.test"
 
     got = server.get("/v1/bundle/latest", headers=auth(status["token"]))
@@ -145,35 +145,63 @@ def test_no_personal_data_in_the_database(server):
     key = issue(server)
     activate(server, key["key"], "my-laptop-serial-123")
     columns = server.app.state.ks.db.columns()
-    flat = {c for cols in columns.values() for c in cols}
+    # Contacts of partner agencies (a business contact person) live only in their own table; nothing about the
+    # people who use keys is stored anywhere.
+    assert set(columns["agencies"]) == {"id", "name", "contact_name", "phone", "email", "note", "created_at", "archived_at"}
+    flat = {c for table, cols in columns.items() if table != "agencies" for c in cols}
     for word in ("name", "email", "mail", "phone", "fio", "ip", "address", "resume", "cv", "telegram"):
         assert not [c for c in flat if word in c.split("_")], (word, columns)
     dump = "\n".join(server.app.state.ks.db.path.read_bytes().decode("latin-1").split("\x00"))
     assert "my-laptop-serial-123" not in dump and key["key"] not in dump
 
 
-def test_tariffs_are_editable(server):
-    tariffs = {t["id"]: t for t in server.get("/v1/admin/tariffs", headers=ADMIN).json()}
-    assert [tariffs[t]["title"] for t in ("self", "guided", "experts")] == [
-        "Самостоятельно", "С сопровождением", "С группой экспертов"]
-    r = server.patch("/v1/admin/tariffs/self", json={"price_rub_from": 16000, "price_rub_to": 16000}, headers=ADMIN)
-    assert r.json()["price_rub_from"] == 16000
+def test_one_tariff_only_its_price_is_editable(server):
+    t = server.get("/v1/admin/tariff", headers=ADMIN).json()
+    assert (t["id"], t["title"], t["price_rub_from"], t["price_rub_to"], t["months"], t["device_limit"], t["active"]) == (
+        "self", "JobShturman", 19990, 19990, 12, 2, 1)
+    r = server.patch("/v1/admin/tariff", json={"price_rub": 21000}, headers=ADMIN)
+    assert r.status_code == 200 and (r.json()["price_rub_from"], r.json()["price_rub_to"]) == (21000, 21000)
+    # nothing but the price: the title, term and limit are not the admin's to change
+    r = server.patch("/v1/admin/tariff", json={"price_rub": 21000, "title": "Другое", "months": 1}, headers=ADMIN)
+    assert r.json()["title"] == "JobShturman" and r.json()["months"] == 12
+    for bad in (0, -5, "дорого", 10_000_001):
+        assert server.patch("/v1/admin/tariff", json={"price_rub": bad}, headers=ADMIN).status_code == 422
+    assert server.patch("/v1/admin/tariffs/self", json={"price_rub_from": 1}, headers=ADMIN).status_code in (404, 405)
+    assert server.patch("/v1/admin/tariff", json={"price_rub": 1}).status_code == 401
     stats = server.get("/v1/admin/stats", headers=ADMIN).json()
     assert stats["keys"] == 0 and stats["latest_bundle"] is None
 
 
+def test_key_is_issued_without_choosing_a_tariff(server):
+    r = server.post("/v1/admin/keys", json={"order_ref": "ORD-1"}, headers=ADMIN)
+    assert r.status_code == 201 and r.json()["tariff_id"] == "self"
+    assert server.post("/v1/admin/keys", json={"tariff_id": "experts"}, headers=ADMIN).status_code == 404
 
-def test_public_tariffs_follow_the_admin_without_a_token(server):
-    """The landing reads prices from here, so an edit in the admin reaches the page without a redeploy."""
-    server.patch("/v1/admin/tariffs/self", json={"price_rub_from": 19900, "price_rub_to": 19900, "months": 12}, headers=ADMIN)
-    server.patch("/v1/admin/tariffs/experts", json={"active": False}, headers=ADMIN)
+
+def test_public_tariff_follows_the_admin_without_a_token(server):
+    """The landing reads the price from here, so an edit in the admin reaches the page without a redeploy."""
+    server.patch("/v1/admin/tariff", json={"price_rub": 18500}, headers=ADMIN)
     r = server.get("/v1/tariffs")
     assert r.status_code == 200 and "max-age" in r.headers["cache-control"]
-    tariffs = {t["id"]: t for t in r.json()}
-    assert tariffs["self"] == {"id": "self", "title": "Самостоятельно", "price_rub_from": 19900, "price_rub_to": 19900,
-                               "months": 12, "device_limit": 2, "active": True}
-    assert tariffs["experts"]["active"] is False
-    assert server.patch("/v1/admin/tariffs/self", json={"months": 1}).status_code == 401
+    assert r.json() == [{"id": "self", "title": "JobShturman", "price_rub_from": 18500, "price_rub_to": 18500,
+                         "months": 12, "device_limit": 2, "active": True}]
+
+
+def test_an_old_database_keeps_one_tariff_and_its_price(tmp_path):
+    """Upgrade of a live base: the retired tariffs switch off, the price set by the admin stays."""
+    import sqlite3
+
+    from hrs_keys.db import DB
+    path = tmp_path / "keys.sqlite3"
+    DB(path).init()
+    with sqlite3.connect(path) as c:
+        c.execute("INSERT INTO tariffs VALUES ('guided', 'С сопровождением', 49900, 49900, 12, 2, 1)")
+        c.execute("UPDATE tariffs SET title = 'Самостоятельно', price_rub_from = 19900, price_rub_to = 19900 WHERE id = 'self'")
+    DB(path).init()
+    with sqlite3.connect(path) as c:
+        rows = {r[0]: r[1:] for r in c.execute("SELECT id, title, price_rub_from, active FROM tariffs")}
+    assert rows == {"self": ("JobShturman", 19900, 1), "guided": ("С сопровождением", 49900, 0)}
+
 
 def test_each_key_has_its_own_watermark_and_a_copied_text_finds_it(server):
     first, second = issue(server), issue(server)

@@ -3,6 +3,7 @@
 Client (hrs):  POST /v1/activate, GET /v1/status, GET /v1/bundle/latest; header X-Hrs-Version
 Admin:         /v1/admin/... with `Authorization: Bearer <HRS_KEYS_ADMIN_TOKEN>`
 Methodologist: /v1/admin/methodology/... and the bundle list with a token of HRS_KEYS_METHODOLOGIST_TOKEN
+Agency:        its own card and keys only (/v1/admin/agencies/<its id>...), with a login token issued in the admin
 """
 import hmac
 
@@ -31,7 +32,9 @@ class Activate(BaseModel):
 
 
 class Issue(BaseModel):
-    tariff_id: str
+    tariff_id: str | None = None  # one tariff: the server fills it in
+    segment: str = Field("private", pattern="^(private|tester)$")
+    note: str | None = Field(None, max_length=200, description="для кого ключ")
     months: int | None = Field(None, ge=1, le=60)
     expires_at: str | None = None
     order_ref: str | None = Field(None, max_length=64, description="номер заказа в платёжном сервисе, без ФИО")
@@ -74,13 +77,48 @@ class Revoke(BaseModel):
     reason: str = Field(pattern="^(refund|violation|reissue|other)$")
 
 
-class TariffPatch(BaseModel):
-    title: str | None = Field(None, max_length=60)
-    price_rub_from: int | None = Field(None, ge=0)
-    price_rub_to: int | None = Field(None, ge=0)
+class KeyPatch(BaseModel):
+    segment: str | None = Field(None, pattern="^(private|tester|agency)$")
+    agency_id: str | None = Field(None, max_length=20)
+    note: str | None = Field(None, max_length=200)
+
+
+class Bulk(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500)
+    action: str = Field(pattern="^(move|archive|unarchive)$")
+    segment: str | None = Field(None, pattern="^(private|tester|agency)$")
+    agency_id: str | None = Field(None, max_length=20)
+    confirm: bool = False
+    reason: str | None = Field(None, pattern="^(expired|revoked|unneeded|other)$")
+    note: str | None = Field(None, max_length=200)
+
+
+class AgencyFields(BaseModel):
+    name: str | None = Field(None, max_length=80)
+    contact_name: str | None = Field(None, max_length=120)
+    phone: str | None = Field(None, max_length=40)
+    email: str | None = Field(None, max_length=120)
+    note: str | None = Field(None, max_length=500)
+
+
+class AgencyPatch(AgencyFields):
+    archived: bool | None = None
+
+
+class Batch(BaseModel):
+    count: int = Field(ge=1, le=200)
     months: int | None = Field(None, ge=1, le=60)
+    expires_at: str | None = None
     device_limit: int | None = Field(None, ge=1, le=10)
-    active: bool | None = None
+    recipient: str | None = Field(None, max_length=200)
+
+
+class AgencyToken(BaseModel):
+    label: str | None = Field(None, max_length=80)
+
+
+class TariffPrice(BaseModel):
+    price_rub: int = Field(ge=1, le=10_000_000)
 
 
 def create_app(settings: Settings | None = None, admin_origins: list[str] | None = None) -> FastAPI:
@@ -107,20 +145,36 @@ def create_app(settings: Settings | None = None, admin_origins: list[str] | None
     # The methodologist (the author of the methodology) edits and publishes it and sees nothing else.
     method_tokens = [t.strip() for t in (ks.s.methodologist_token or "").split(",") if t.strip()]
 
-    def role_of(authorization: str | None) -> str:
+    def principal(authorization: str | None) -> dict:
         token = bearer(authorization)
         if any(hmac.compare_digest(token, known) for known in admin_tokens):
-            return "admin"
+            return {"role": "admin"}
         if any(hmac.compare_digest(token, known) for known in method_tokens):
-            return "methodologist"
+            return {"role": "methodologist"}
+        agency = ks.agency_for_token(token)
+        if agency:
+            return {"role": "agency", "agency": agency}
         raise KeyServerError("forbidden", "Неверный токен администратора", 403)
 
     def admin(authorization: str | None = Header(None)):
-        if role_of(authorization) != "admin":
+        if principal(authorization)["role"] != "admin":
             raise KeyServerError("forbidden", "Этот раздел только для администратора", 403)
 
     def editor(authorization: str | None = Header(None)) -> str:
-        return role_of(authorization)
+        """The methodology: the admin and the methodologist; an agency never."""
+        role = principal(authorization)["role"]
+        if role not in ("admin", "methodologist"):
+            raise KeyServerError("forbidden", "Этот раздел недоступен", 403)
+        return role
+
+    def agency_reader(agency_id: str, authorization: str | None = Header(None)) -> bool:
+        """The admin sees every agency (True), an agency only itself (False)."""
+        who = principal(authorization)
+        if who["role"] == "admin":
+            return True
+        if who["role"] == "agency" and hmac.compare_digest(who["agency"]["id"], agency_id):
+            return False
+        raise KeyServerError("forbidden", "Этот раздел недоступен", 403)
 
     # --- client ---
 
@@ -154,13 +208,15 @@ def create_app(settings: Settings | None = None, admin_origins: list[str] | None
     def health():
         return {"ok": True}
 
-    # Public: the landing shows prices from here, so an admin edit reaches the page without a redeploy.
+    # Public: the landing shows the price from here, so an admin edit reaches the page without a redeploy.
+    # Only the tariff on sale; the list shape is kept for installed clients and checks.
     @app.get("/v1/tariffs")
     def public_tariffs(response: Response):
         response.headers["Cache-Control"] = "public, max-age=60"
+        t = ks.tariff()
         return [{"id": t["id"], "title": t["title"], "price_rub_from": t["price_rub_from"],
                  "price_rub_to": t["price_rub_to"], "months": t["months"], "device_limit": t["device_limit"],
-                 "active": bool(t["active"])} for t in ks.tariffs()]
+                 "active": bool(t["active"])}]
 
     # --- admin ---
 
@@ -174,16 +230,67 @@ def create_app(settings: Settings | None = None, admin_origins: list[str] | None
     def tariffs():
         return ks.tariffs()
 
-    @app.patch("/v1/admin/tariffs/{tariff_id}", dependencies=a)
-    def tariff_patch(tariff_id: str, body: TariffPatch):
-        fields = body.model_dump(exclude_none=True)
-        if "active" in fields:
-            fields["active"] = int(fields["active"])
-        return ks.update_tariff(tariff_id, **fields)
+    @app.get("/v1/admin/tariff", dependencies=a)
+    def tariff():
+        return ks.tariff()
+
+    @app.patch("/v1/admin/tariff", dependencies=a)
+    def tariff_price(body: TariffPrice):
+        return ks.set_price(body.price_rub)
 
     @app.get("/v1/admin/keys", dependencies=a)
-    def keys(state: str | None = None):
-        return ks.keys(state)
+    def keys(state: str | None = None, segment: str | None = Query(None, pattern="^(private|tester|agency)$"),
+             agency: str | None = Query(None, max_length=20), archived: bool = False):
+        return ks.keys(state, segment, agency, archived)
+
+    @app.post("/v1/admin/keys/bulk", dependencies=a)
+    def keys_bulk(body: Bulk):
+        return ks.bulk(body.ids, body.action, body.segment, body.agency_id, body.confirm, body.reason, body.note)
+
+    @app.patch("/v1/admin/keys/{key_id}", dependencies=a)
+    def key_patch(key_id: str, body: KeyPatch):
+        return ks.set_segment(key_id, body.segment, body.agency_id, body.note)
+
+    # --- agencies ---
+
+    @app.get("/v1/admin/agencies", dependencies=a)
+    def agencies():
+        return ks.agencies()
+
+    @app.post("/v1/admin/agencies", dependencies=a, status_code=201)
+    def agency_create(body: AgencyFields):
+        return ks.create_agency(**body.model_dump())
+
+    @app.get("/v1/admin/agencies/{agency_id}")
+    def agency(agency_id: str, full: bool = Depends(agency_reader)):
+        return ks.agency(agency_id, full=full)
+
+    @app.patch("/v1/admin/agencies/{agency_id}", dependencies=a)
+    def agency_patch(agency_id: str, body: AgencyPatch):
+        return ks.update_agency(agency_id, **body.model_dump(exclude_none=True))
+
+    @app.get("/v1/admin/agencies/{agency_id}/keys")
+    def agency_keys(agency_id: str, full: bool = Depends(agency_reader)):
+        keys = ks.keys(agency_id=agency_id)
+        return keys if full else [ks.agency_key_view(k) for k in keys]
+
+    @app.get("/v1/admin/agencies/{agency_id}/export.md")
+    def agency_export(agency_id: str, full: bool = Depends(agency_reader)):
+        text, filename = ks.agency_markdown(agency_id)
+        return Response(text, media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    @app.post("/v1/admin/agencies/{agency_id}/batches", dependencies=a, status_code=201)
+    def agency_batch(agency_id: str, body: Batch):
+        return ks.issue_batch(agency_id, body.count, body.months, body.expires_at, body.device_limit, body.recipient)
+
+    @app.post("/v1/admin/agencies/{agency_id}/tokens", dependencies=a, status_code=201)
+    def agency_token(agency_id: str, body: AgencyToken):
+        return ks.create_agency_token(agency_id, body.label)
+
+    @app.delete("/v1/admin/agencies/{agency_id}/tokens/{token_id}", dependencies=a)
+    def agency_token_revoke(agency_id: str, token_id: str):
+        return ks.revoke_agency_token(agency_id, token_id)
 
     @app.post("/v1/admin/keys", dependencies=a, status_code=201)
     def issue(body: Issue):
@@ -218,8 +325,8 @@ def create_app(settings: Settings | None = None, admin_origins: list[str] | None
         return ks.events(key_id, limit)
 
     @app.get("/v1/admin/whoami")
-    def whoami(role: str = Depends(editor)):
-        return {"role": role}
+    def whoami(authorization: str | None = Header(None)):
+        return principal(authorization)
 
     @app.post("/v1/admin/keys/{key_id}/channel", dependencies=a)
     def key_channel(key_id: str, body: Channel):

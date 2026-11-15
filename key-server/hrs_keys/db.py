@@ -59,6 +59,36 @@ CREATE TABLE IF NOT EXISTS revisions (
     message TEXT NOT NULL,
     tree TEXT NOT NULL
 );
+-- Agencies buy keys in batches (owner decision 2026-11-15); an agency may get its own read-only login.
+CREATE TABLE IF NOT EXISTS agencies (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    contact_name TEXT,
+    phone TEXT,
+    email TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL,
+    archived_at TEXT
+);
+CREATE TABLE IF NOT EXISTS batches (
+    id TEXT PRIMARY KEY,
+    agency_id TEXT NOT NULL REFERENCES agencies(id),
+    count INTEGER NOT NULL,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    device_limit INTEGER NOT NULL,
+    recipient TEXT
+);
+-- Logins of agencies: only a hash of the token is kept, the token itself is shown once.
+CREATE TABLE IF NOT EXISTS agency_tokens (
+    id TEXT PRIMARY KEY,
+    agency_id TEXT NOT NULL REFERENCES agencies(id),
+    token_hash TEXT NOT NULL UNIQUE,
+    label TEXT,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked_at TEXT
+);
 -- Which published version each channel gets: test keys first, then everyone (stable).
 CREATE TABLE IF NOT EXISTS current_bundle (
     channel TEXT PRIMARY KEY CHECK (channel IN ('stable', 'test')),
@@ -77,14 +107,26 @@ MIGRATIONS = [
     ("keys", "pinned_version", "TEXT"),
     ("keys", "pin_auto", "TEXT"),  # JSON: an important version installed without asking, to tell the person
     ("bundles", "important", "INTEGER NOT NULL DEFAULT 0"),
+    # Whose key it is: an agency's (agency_id, batch_id), a private buyer's or a tester's.
+    ("keys", "segment", "TEXT NOT NULL DEFAULT 'private'"),
+    ("keys", "agency_id", "TEXT REFERENCES agencies(id)"),
+    ("keys", "batch_id", "TEXT REFERENCES batches(id)"),
+    ("keys", "note", "TEXT"),  # for whom the key was issued
+    # The archive instead of deleting: the key stops working and leaves every list and count; it can come back.
+    ("keys", "archived_at", "TEXT"),
+    # Why it went to the archive and what state it was in at that moment: active, expiring, expired, revoked.
+    ("keys", "archive_reason", "TEXT"),
+    ("keys", "archive_note", "TEXT"),
+    ("keys", "archived_state", "TEXT"),
 ]
 
-# Prices are not final (owner decision 2026-10-10); the admin edits them.
-DEFAULT_TARIFFS = [
-    ("self", "Самостоятельно", 15000, 15000, 3, 2),
-    ("guided", "С сопровождением", 30000, 80000, 3, 2),
-    ("experts", "С группой экспертов", 200000, 200000, 3, 2),
-]
+# One tariff (owner decision 2026-11-15): the admin changes only its price.
+# The title, term and device limit are set here. Rows of the retired tariffs stay
+# switched off, because already issued keys refer to them.
+TARIFF_ID = "self"
+TARIFF_TITLE = "JobShturman"
+DEFAULT_PRICE_RUB = 19990
+DEFAULT_TARIFFS = [(TARIFF_ID, TARIFF_TITLE, DEFAULT_PRICE_RUB, DEFAULT_PRICE_RUB, 12, 2)]
 
 
 class DB:
@@ -98,11 +140,14 @@ class DB:
         for table, column, definition in MIGRATIONS:
             if column not in [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        conn.execute("CREATE INDEX IF NOT EXISTS keys_agency ON keys(agency_id)")
         conn.commit()
         conn.close()
         with self.tx() as c:
             c.executemany("INSERT OR IGNORE INTO tariffs (id, title, price_rub_from, price_rub_to, months, device_limit)"
                           " VALUES (?, ?, ?, ?, ?, ?)", DEFAULT_TARIFFS)
+            c.execute("UPDATE tariffs SET title = ?, active = 1 WHERE id = ?", (TARIFF_TITLE, TARIFF_ID))
+            c.execute("UPDATE tariffs SET active = 0 WHERE id != ?", (TARIFF_ID,))
         return self
 
     @contextmanager
